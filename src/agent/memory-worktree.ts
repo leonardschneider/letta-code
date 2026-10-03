@@ -13,6 +13,11 @@ import {
   type ReflectionMergeRequest,
   reflectionMergeTrailers,
 } from "@/agent/reflection-merge-approval";
+import {
+  describeReflectionBranch,
+  dropApprovedLines,
+  keepOnlyApprovedPaths,
+} from "@/agent/reflection-merge-edits";
 import { getMemfsServerUrl } from "@/backend/api/memfs-git-proxy";
 import { debugLog } from "@/utils/debug";
 
@@ -100,10 +105,13 @@ async function buildReflectionMergeMessage(
   parentMemoryDir: string,
   branchName: string,
 ): Promise<string> {
+  // The reflection's own last commit (not the harness's edit commits added on approval).
   const result = await tryRunGit(parentMemoryDir, [
     "log",
     "-1",
     "--pretty=%s",
+    "--invert-grep",
+    "--grep=^chore(reflection): drop ",
     branchName,
   ]);
   const summary = summarizeReflectionCommitSubject(result?.stdout ?? "");
@@ -600,13 +608,13 @@ export async function finalizeReflectionMemoryWorktreeUnlocked(
     approval = await options.approve(
       await describeReflectionBranch(worktree, options.messageRange),
     );
-    const paths =
-      approval.decision === "approve_paths" ? approval.approve_paths : [];
-    if (
-      approval.decision === "reject" ||
-      (approval.decision === "approve_paths" &&
-        !(await keepOnlyApprovedPaths(worktree, paths)))
-    ) {
+    const applied =
+      approval.decision === "approve_paths"
+        ? await keepOnlyApprovedPaths(worktree, approval.approve_paths)
+        : approval.decision === "approve_edits"
+          ? await dropApprovedLines(worktree, approval.drop)
+          : approval.decision === "approve";
+    if (!applied) {
       await cleanupWorktreeAndBranch(
         worktree.parentMemoryDir,
         worktree.worktreeDir,
@@ -793,116 +801,6 @@ export async function integrateMemoryWorkerWorktree(
   ]);
   const head = await getHead(worktree.parentMemoryDir);
   return { status: "merged", commitCount, head: head ?? "" };
-}
-
-const MAX_REFLECTION_DIFF_CHARACTERS = 64_000;
-
-/** What a client sees before approving a reflection branch. */
-export async function describeReflectionBranch(
-  worktree: ReflectionMemoryWorktree,
-  messageRange?: { start?: string; end?: string },
-): Promise<Omit<ReflectionMergeRequest, "agent_id">> {
-  const range = `${worktree.baseHead}..${worktree.branchName}`;
-  const cwd = worktree.parentMemoryDir;
-  const log = await runGit(cwd, [
-    "log",
-    "--reverse",
-    "--format=%H%x1f%s%x1f%an <%ae>",
-    range,
-  ]);
-  const names = await runGit(cwd, [
-    "diff",
-    "--name-status",
-    "--no-renames",
-    range.replace("..", "..."),
-  ]);
-  const stat = await runGit(cwd, [
-    "diff",
-    "--stat",
-    worktree.baseHead,
-    worktree.branchName,
-  ]);
-  const diff = await runGit(cwd, [
-    "diff",
-    "--no-color",
-    worktree.baseHead,
-    worktree.branchName,
-  ]);
-  return {
-    branch: worktree.branchName,
-    base_head: worktree.baseHead,
-    head: (await getHead(worktree.worktreeDir)) ?? "",
-    commits: log.stdout
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => {
-        const [sha = "", subject = "", author = ""] = line.split("\x1f");
-        return { sha, subject, author };
-      }),
-    files: names.stdout
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => {
-        const [status = "M", path = ""] = line.split("\t");
-        return {
-          path,
-          status: (status === "A" || status === "D" ? status : "M") as
-            | "A"
-            | "M"
-            | "D",
-        };
-      }),
-    diff_stat: stat.stdout.trim(),
-    diff: diff.stdout.slice(0, MAX_REFLECTION_DIFF_CHARACTERS),
-    diff_truncated: diff.stdout.length > MAX_REFLECTION_DIFF_CHARACTERS,
-    ...(messageRange ? { message_range: messageRange } : {}),
-  };
-}
-
-/**
- * Keep only `paths` of a reflection branch: one commit on the branch that
- * restores every other changed path to the base. False when nothing approved
- * remains (the merge is then rejected).
- */
-async function keepOnlyApprovedPaths(
-  worktree: ReflectionMemoryWorktree,
-  paths: readonly string[],
-): Promise<boolean> {
-  const approved = new Set(paths);
-  const changed = (
-    await runGit(worktree.worktreeDir, [
-      "diff",
-      "--name-only",
-      "--no-renames",
-      worktree.baseHead,
-      "HEAD",
-    ])
-  ).stdout
-    .split("\n")
-    .filter(Boolean);
-  const dropped = changed.filter((path) => !approved.has(path));
-  if (dropped.length === changed.length) return false;
-  if (!dropped.length) return true;
-  for (const path of dropped) {
-    const atBase = await tryRunGit(worktree.worktreeDir, [
-      "cat-file",
-      "-e",
-      `${worktree.baseHead}:${path}`,
-    ]);
-    await runGit(
-      worktree.worktreeDir,
-      atBase
-        ? ["checkout", worktree.baseHead, "--", path]
-        : ["rm", "-q", "--", path],
-    );
-  }
-  await runGit(worktree.worktreeDir, [
-    "commit",
-    "-q",
-    "-m",
-    `chore(reflection): drop paths the client did not approve\n\nDropped: ${dropped.join(", ")}`,
-  ]);
-  return true;
 }
 
 export interface ReflectionMemoryWorktreeFinalizeOptions {

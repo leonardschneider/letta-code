@@ -1,3 +1,4 @@
+import { isReflectionLineDropList } from "@/agent/reflection-merge-approval";
 import type {
   GetReflectionSettingsCommand,
   ReflectionMergeResponseCommand,
@@ -75,6 +76,7 @@ export function isReflectionMergeResponseCommand(
     request_id?: unknown;
     decision?: unknown;
     approve_paths?: unknown;
+    drop?: unknown;
     reason?: unknown;
   };
   return (
@@ -84,7 +86,8 @@ export function isReflectionMergeResponseCommand(
       c.decision === "reject" ||
       (c.decision === "approve_paths" &&
         Array.isArray(c.approve_paths) &&
-        c.approve_paths.every((path) => typeof path === "string"))) &&
+        c.approve_paths.every((path) => typeof path === "string")) ||
+      (c.decision === "approve_edits" && isReflectionLineDropList(c.drop))) &&
     (c.reason === undefined || typeof c.reason === "string")
   );
 }

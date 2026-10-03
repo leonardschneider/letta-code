@@ -61,11 +61,17 @@ export interface ReflectionMergeRequestMessage {
   expires_at: string;
 }
 
-/** The client's answer. No answer before `expires_at` is a rejection. */
+/**
+ * The client's answer. No answer before `expires_at` is a rejection.
+ * `approve_edits` merges the branch with `drop` lines removed: each is a
+ * line range of a file at the branch head that the branch added, with its
+ * exact text; anything that does not apply exactly rejects the merge.
+ */
 export interface ReflectionMergeResponseCommand {
   type: "reflection_merge_response";
   request_id: string;
-  decision: "approve" | "reject" | "approve_paths";
+  decision: "approve" | "reject" | "approve_paths" | "approve_edits";
   approve_paths?: string[];
+  drop?: { path: string; start: number; end: number; text: string }[];
   reason?: string;
 }

@@ -40,6 +40,23 @@ describe("client-approved reflection merge protocol", () => {
       isReflectionMergeResponseCommand({ ...base, decision: "approve_paths" }),
     ).toBe(false);
     expect(
+      isReflectionMergeResponseCommand({
+        ...base,
+        decision: "approve_edits",
+        drop: [{ path: "a.md", start: 2, end: 3, text: "x\ny" }],
+      }),
+    ).toBe(true);
+    expect(
+      isReflectionMergeResponseCommand({
+        ...base,
+        decision: "approve_edits",
+        drop: [{ path: "a.md", start: 0, end: 1, text: "" }],
+      }),
+    ).toBe(false);
+    expect(
+      isReflectionMergeResponseCommand({ ...base, decision: "approve_edits" }),
+    ).toBe(false);
+    expect(
       isReflectionMergeResponseCommand({ ...base, decision: "maybe" }),
     ).toBe(false);
     expect(

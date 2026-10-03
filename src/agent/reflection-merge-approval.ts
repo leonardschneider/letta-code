@@ -38,10 +38,51 @@ export interface ReflectionMergeRequest {
   untrusted_tool_results?: number;
 }
 
+/**
+ * Lines a client drops from a reflection branch before it merges: lines
+ * `start`..`end` (1-based, inclusive) of `path` as it is at the branch head.
+ * Only lines the branch added may be dropped, and `text` (the exact lines,
+ * joined with "\n") must match: a drop that does not apply exactly rejects
+ * the whole merge.
+ */
+export interface ReflectionLineDrop {
+  path: string;
+  start: number;
+  end: number;
+  text: string;
+}
+
 export type ReflectionMergeDecision =
   | { decision: "approve"; reason?: string }
   | { decision: "approve_paths"; approve_paths: string[]; reason?: string }
+  | { decision: "approve_edits"; drop: ReflectionLineDrop[]; reason?: string }
   | { decision: "reject"; reason?: string };
+
+export const MAX_REFLECTION_LINE_DROPS = 200;
+
+/** A well-formed drop list (shape only; whether it applies is checked against the branch). */
+export function isReflectionLineDropList(
+  value: unknown,
+): value is ReflectionLineDrop[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= MAX_REFLECTION_LINE_DROPS &&
+    value.every((drop) => {
+      const d = drop as Partial<ReflectionLineDrop> | null;
+      return (
+        !!d &&
+        typeof d.path === "string" &&
+        d.path.length > 0 &&
+        Number.isSafeInteger(d.start) &&
+        Number.isSafeInteger(d.end) &&
+        (d.start as number) >= 1 &&
+        (d.end as number) >= (d.start as number) &&
+        typeof d.text === "string"
+      );
+    })
+  );
+}
 
 export type ReflectionMergeApprover = (
   request: ReflectionMergeRequest,
@@ -89,6 +130,7 @@ export function parseReflectionMergeDecision(
   const v = value as {
     decision?: unknown;
     approve_paths?: unknown;
+    drop?: unknown;
     reason?: unknown;
   };
   const reason =
@@ -103,6 +145,18 @@ export function parseReflectionMergeDecision(
     return {
       decision: "approve_paths",
       approve_paths: v.approve_paths as string[],
+      ...withReason,
+    };
+  }
+  if (v.decision === "approve_edits" && isReflectionLineDropList(v.drop)) {
+    return {
+      decision: "approve_edits",
+      drop: v.drop.map(({ path, start, end, text }) => ({
+        path,
+        start,
+        end,
+        text,
+      })),
       ...withReason,
     };
   }
