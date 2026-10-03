@@ -66,6 +66,7 @@ import {
   shouldQueueInboundMessage,
 } from "./queue";
 import { emitLoopErrorNotice } from "./recoverable-notices";
+import { handleReflectionMergeResponse } from "./reflection-merge-client";
 import { getActiveRuntime, safeEmitWsEvent } from "./runtime";
 import { parseListenerReadyMessage } from "./split-stream-lifecycle";
 import { validateResponseFormat } from "./structured-output";
@@ -341,6 +342,11 @@ export function createListenerMessageHandler(
 
       if (parsed.type === "external_tool_call_response") {
         handleExternalToolCallResponseCommand(runtime, connectionId, parsed);
+        return;
+      }
+
+      if (parsed.type === "reflection_merge_response") {
+        handleReflectionMergeResponse(socket, parsed);
         return;
       }
 

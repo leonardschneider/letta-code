@@ -1,6 +1,7 @@
 export type ReflectionTrigger = "off" | "step-count" | "compaction-event";
 
-export type ReflectionMergeMode = "auto" | "explicit";
+/** See `ReflectionMergeMode` in the protocol: `client` asks the SDK client before merging. */
+export type ReflectionMergeMode = "auto" | "explicit" | "client";
 
 /** Host policy, independent of saved trigger settings. Manual reflection is unaffected. */
 export function isAutoReflectionEnabled(): boolean {

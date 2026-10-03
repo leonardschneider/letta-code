@@ -61,6 +61,11 @@ import type {
   StatusMessage,
 } from "./loop-status-protocol";
 import type {
+  ReflectionSettingsScope,
+  ReflectionSettingsSnapshot,
+  SetReflectionSettingsCommand,
+} from "./reflection-merge-protocol";
+import type {
   AgentRuntimeScope,
   ConversationRuntimeScope,
 } from "./runtime-scope";
@@ -98,6 +103,7 @@ export type * from "./channel-account-protocol";
 export type * from "./cwd-protocol";
 export type * from "./external-tool-protocol";
 export type * from "./loop-status-protocol";
+export type * from "./reflection-merge-protocol";
 export type * from "./runtime-scope";
 export type * from "./runtime-start-protocol";
 export type * from "./schedule-protocol";
@@ -199,16 +205,6 @@ export interface PendingControlRequest {
   request: ControlRequestBody;
 }
 
-export type ReflectionTriggerMode = "off" | "step-count" | "compaction-event";
-export type ReflectionMergeMode = "auto" | "explicit";
-export type ReflectionSettingsScope = "local_project" | "global" | "both";
-export interface ReflectionSettingsSnapshot {
-  agent_id: string;
-  trigger: ReflectionTriggerMode;
-  step_count: number;
-  merge: ReflectionMergeMode;
-  merge_instructions: string;
-}
 export type ChannelId = string;
 
 // ── Channel config schema (declarative plugin UI) ──
@@ -1675,19 +1671,6 @@ export interface GetReflectionSettingsCommand {
   request_id: string;
   runtime: AgentRuntimeScope;
 }
-export interface SetReflectionSettingsCommand {
-  type: "set_reflection_settings";
-  /** Echoed back in the response for request correlation. */
-  request_id: string;
-  runtime: AgentRuntimeScope;
-  settings: {
-    trigger: ReflectionTriggerMode;
-    step_count: number;
-    merge?: ReflectionMergeMode;
-    merge_instructions?: string;
-  };
-  scope?: ReflectionSettingsScope;
-}
 
 export interface GetExperimentsCommand {
   type: "get_experiments";
@@ -2400,6 +2383,7 @@ export type WsProtocolCommand =
   | CwdProtocol.GetCwdMapCommand
   | GetReflectionSettingsCommand
   | SetReflectionSettingsCommand
+  | import("./reflection-merge-protocol").ReflectionMergeResponseCommand
   | GetExperimentsCommand
   | SetExperimentCommand
   | ChannelsListCommand
@@ -2502,6 +2486,7 @@ export type WsProtocolMessage =
   | SetExperimentResponseMessage
   | GetReflectionSettingsResponseMessage
   | SetReflectionSettingsResponseMessage
+  | import("./reflection-merge-protocol").ReflectionMergeRequestMessage
   | ChannelsListResponseMessage
   | ChannelAccountsListResponseMessage
   | ChannelAccountCreateResponseMessage

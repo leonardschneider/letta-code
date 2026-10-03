@@ -86,7 +86,9 @@ function normalizeMerge(
   value: unknown,
   fallback: ReflectionMergeMode,
 ): ReflectionMergeMode {
-  return value === "auto" || value === "explicit" ? value : fallback;
+  return value === "auto" || value === "explicit" || value === "client"
+    ? value
+    : fallback;
 }
 
 function normalizeMergeInstructions(value: unknown, fallback: string): string {

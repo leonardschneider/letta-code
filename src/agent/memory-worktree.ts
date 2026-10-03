@@ -8,6 +8,11 @@ import { getAuthToken } from "@/agent/memory-auth";
 import { runGit as runMemoryGit } from "@/agent/memory-git";
 import { GIT_DISABLE_COMMIT_SIGNING_ARGS } from "@/agent/memory-git-signing";
 import { withMemoryOperation } from "@/agent/memory-operation";
+import {
+  type ReflectionMergeDecision,
+  type ReflectionMergeRequest,
+  reflectionMergeTrailers,
+} from "@/agent/reflection-merge-approval";
 import { getMemfsServerUrl } from "@/backend/api/memfs-git-proxy";
 import { debugLog } from "@/utils/debug";
 
@@ -218,6 +223,7 @@ export type ReflectionMemoryWorktreeFinalizeStatus =
   | "parent_dirty"
   | "merge_conflict"
   | "dirty_uncommitted"
+  | "rejected"
   | "failed";
 
 export interface ReflectionMemoryWorktreeFinalizeResult {
@@ -230,6 +236,8 @@ export interface ReflectionMemoryWorktreeFinalizeResult {
   summary: string;
   error?: string;
   failurePhase?: "reflection" | "integration";
+  /** `merge: "client"`: what the client decided. */
+  approval?: ReflectionMergeDecision;
 }
 
 export function reflectionIntegrationConsumesTranscript(
@@ -586,6 +594,44 @@ export async function finalizeReflectionMemoryWorktreeUnlocked(
     };
   }
 
+  let approval: ReflectionMergeDecision | undefined;
+  if (options.approve) {
+    // merge: "client": the SDK client decides before anything reaches main.
+    approval = await options.approve(
+      await describeReflectionBranch(worktree, options.messageRange),
+    );
+    const paths =
+      approval.decision === "approve_paths" ? approval.approve_paths : [];
+    if (
+      approval.decision === "reject" ||
+      (approval.decision === "approve_paths" &&
+        !(await keepOnlyApprovedPaths(worktree, paths)))
+    ) {
+      await cleanupWorktreeAndBranch(
+        worktree.parentMemoryDir,
+        worktree.worktreeDir,
+        worktree.branchName,
+        { force: true },
+      );
+      debugLog(
+        "memfs-git",
+        "reflection finalized id=%s status=rejected reason=%s cleanedUp=true retryable=true",
+        worktree.id,
+        approval.reason ?? "",
+      );
+      return {
+        status: "rejected",
+        parentMemoryDir: worktree.parentMemoryDir,
+        reflectionWorktreeDir: worktree.worktreeDir,
+        reflectionBranch: worktree.branchName,
+        commitCount,
+        head,
+        approval,
+        summary: `The client rejected the reflection merge${approval.reason ? ` (${approval.reason})` : ""}; the worktree was cleaned up and the transcript was not consumed.`,
+      };
+    }
+  }
+
   debugLog(
     "memfs-git",
     "reflection merge attempt id=%s branch=%s parent=%s commitCount=%d",
@@ -594,12 +640,18 @@ export async function finalizeReflectionMemoryWorktreeUnlocked(
     worktree.parentMemoryDir,
     commitCount,
   );
-  const mergeMessage = await buildReflectionMergeMessage(
+  const trailers = reflectionMergeTrailers({
+    messageRange: options.messageRange,
+    decision: approval?.decision,
+  });
+  const mergeMessage = `${await buildReflectionMergeMessage(
     worktree.parentMemoryDir,
     worktree.branchName,
-  );
+  )}${trailers.length ? `\n\n${trailers.join("\n")}` : ""}`;
+  // Trailers need a merge commit: never fast-forward when there are any.
   const mergeResult = await tryRunGit(worktree.parentMemoryDir, [
     "merge",
+    ...(trailers.length ? ["--no-ff"] : []),
     worktree.branchName,
     "-m",
     mergeMessage,
@@ -652,6 +704,7 @@ export async function finalizeReflectionMemoryWorktreeUnlocked(
     reflectionBranch: worktree.branchName,
     commitCount,
     head: mergedHead,
+    ...(approval ? { approval } : {}),
     summary: `Merged ${commitCount} reflection memory commit(s) into parent memory main.`,
   };
 }
@@ -742,7 +795,123 @@ export async function integrateMemoryWorkerWorktree(
   return { status: "merged", commitCount, head: head ?? "" };
 }
 
+const MAX_REFLECTION_DIFF_CHARACTERS = 64_000;
+
+/** What a client sees before approving a reflection branch. */
+export async function describeReflectionBranch(
+  worktree: ReflectionMemoryWorktree,
+  messageRange?: { start?: string; end?: string },
+): Promise<Omit<ReflectionMergeRequest, "agent_id">> {
+  const range = `${worktree.baseHead}..${worktree.branchName}`;
+  const cwd = worktree.parentMemoryDir;
+  const log = await runGit(cwd, [
+    "log",
+    "--reverse",
+    "--format=%H%x1f%s%x1f%an <%ae>",
+    range,
+  ]);
+  const names = await runGit(cwd, [
+    "diff",
+    "--name-status",
+    "--no-renames",
+    range.replace("..", "..."),
+  ]);
+  const stat = await runGit(cwd, [
+    "diff",
+    "--stat",
+    worktree.baseHead,
+    worktree.branchName,
+  ]);
+  const diff = await runGit(cwd, [
+    "diff",
+    "--no-color",
+    worktree.baseHead,
+    worktree.branchName,
+  ]);
+  return {
+    branch: worktree.branchName,
+    base_head: worktree.baseHead,
+    head: (await getHead(worktree.worktreeDir)) ?? "",
+    commits: log.stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [sha = "", subject = "", author = ""] = line.split("\x1f");
+        return { sha, subject, author };
+      }),
+    files: names.stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const [status = "M", path = ""] = line.split("\t");
+        return {
+          path,
+          status: (status === "A" || status === "D" ? status : "M") as
+            | "A"
+            | "M"
+            | "D",
+        };
+      }),
+    diff_stat: stat.stdout.trim(),
+    diff: diff.stdout.slice(0, MAX_REFLECTION_DIFF_CHARACTERS),
+    diff_truncated: diff.stdout.length > MAX_REFLECTION_DIFF_CHARACTERS,
+    ...(messageRange ? { message_range: messageRange } : {}),
+  };
+}
+
+/**
+ * Keep only `paths` of a reflection branch: one commit on the branch that
+ * restores every other changed path to the base. False when nothing approved
+ * remains (the merge is then rejected).
+ */
+async function keepOnlyApprovedPaths(
+  worktree: ReflectionMemoryWorktree,
+  paths: readonly string[],
+): Promise<boolean> {
+  const approved = new Set(paths);
+  const changed = (
+    await runGit(worktree.worktreeDir, [
+      "diff",
+      "--name-only",
+      "--no-renames",
+      worktree.baseHead,
+      "HEAD",
+    ])
+  ).stdout
+    .split("\n")
+    .filter(Boolean);
+  const dropped = changed.filter((path) => !approved.has(path));
+  if (dropped.length === changed.length) return false;
+  if (!dropped.length) return true;
+  for (const path of dropped) {
+    const atBase = await tryRunGit(worktree.worktreeDir, [
+      "cat-file",
+      "-e",
+      `${worktree.baseHead}:${path}`,
+    ]);
+    await runGit(
+      worktree.worktreeDir,
+      atBase
+        ? ["checkout", worktree.baseHead, "--", path]
+        : ["rm", "-q", "--", path],
+    );
+  }
+  await runGit(worktree.worktreeDir, [
+    "commit",
+    "-q",
+    "-m",
+    `chore(reflection): drop paths the client did not approve\n\nDropped: ${dropped.join(", ")}`,
+  ]);
+  return true;
+}
+
 export interface ReflectionMemoryWorktreeFinalizeOptions {
+  /** `merge: "client"`: ask before merging; a rejection cleans up without consuming the transcript. */
+  approve?: (
+    request: Omit<ReflectionMergeRequest, "agent_id">,
+  ) => Promise<ReflectionMergeDecision>;
+  /** The reflected message range, recorded as a `Reflected-Messages` merge trailer. */
+  messageRange?: { start?: string; end?: string };
   shouldMerge: boolean;
   knownNoChanges?: boolean;
   failureSummary?: string;

@@ -270,6 +270,7 @@ export function buildDeviceStatus(
           step_count: reflectionSettings?.stepCount ?? 25,
           merge: reflectionSettings?.merge ?? "auto",
           merge_instructions: reflectionSettings?.mergeInstructions ?? "",
+          merge_modes: ["auto", "explicit", "client"],
         }
       : null,
   };

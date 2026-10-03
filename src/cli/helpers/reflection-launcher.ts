@@ -6,7 +6,6 @@ import { detectMemoryFormat } from "@/agent/memory-format";
 import { syncPendingMemoryCommitsAfterTurn } from "@/agent/memory-git";
 import { withMemoryOperation } from "@/agent/memory-operation";
 import {
-  buildReflectionIntegrationMemoryScope,
   buildReflectionMemoryScope,
   createReflectionMemoryWorktree,
   finalizeReflectionMemoryWorktree,
@@ -31,11 +30,17 @@ import {
   handleMemorySubagentCompletion,
   type MemorySubagentSuccessMessageOverride,
 } from "@/cli/helpers/memory-subagent-completion";
+import {
+  clientMergeFinalizeOptions,
+  clientRejectedMessage,
+} from "@/cli/helpers/reflection-client-merge";
 import { finalizeAutoReflectionCompletion } from "@/cli/helpers/reflection-completion";
 import { classifyReflectionConfigurationError } from "@/cli/helpers/reflection-configuration-error";
 import {
   buildReflectionIntegrationConversationTitle,
-  buildReflectionIntegrationPrompt,
+  type ReflectionIntegrationOutcome,
+  type RunExplicitReflectionIntegration,
+  runExplicitReflectionIntegration,
 } from "@/cli/helpers/reflection-integration";
 import {
   isReflectionRetryDeferred,
@@ -165,6 +170,7 @@ function getReflectionWorktreeCleanupOutcome(
       return { outcome: "subagent_failed", integrationStatus: "failed" };
     case "merged":
     case "no_changes":
+    case "rejected":
       return undefined;
   }
 }
@@ -432,6 +438,8 @@ function getReflectionCompletionMessage(
       return "Tried to reflect, but memory updates conflicted with newer changes; will retry later.";
     case "dirty_uncommitted":
       return "Tried to reflect, but memory changes were not committed cleanly; will retry later.";
+    case "rejected":
+      return clientRejectedMessage(integration);
     case "failed": {
       if (integration.failurePhase === "integration") {
         return `${integration.summary} Will retry later.`;
@@ -446,82 +454,6 @@ function getReflectionCompletionMessage(
         : `Reflection failed: ${configurationError.message} Fix the reflection model configuration, then use /reflect to retry.`;
     }
   }
-}
-
-interface ReflectionIntegrationOutcome {
-  success: boolean;
-  error?: string;
-  conversationId?: string;
-}
-
-type RunExplicitReflectionIntegration = typeof runExplicitReflectionIntegration;
-
-async function runExplicitReflectionIntegration(params: {
-  agentId: string;
-  conversationId: string;
-  worktree: ReflectionMemoryWorktree;
-  instructions?: string;
-  reflectionSubagentId?: string;
-}): Promise<ReflectionIntegrationOutcome> {
-  const {
-    spawnBackgroundSubagentTask,
-    waitForBackgroundSubagentConversationId,
-  } = await import("@/tools/impl/task");
-  return await new Promise<ReflectionIntegrationOutcome>((resolve) => {
-    try {
-      const { subagentId } = spawnBackgroundSubagentTask({
-        subagentType: "general-purpose",
-        displayType: "reflection integration",
-        prompt: buildReflectionIntegrationPrompt({
-          worktree: params.worktree,
-          instructions: params.instructions,
-          reflectionSubagentId: params.reflectionSubagentId,
-        }),
-        description: "Integrate reflection memory changes",
-        existingAgentId: params.agentId,
-        memoryScope: buildReflectionIntegrationMemoryScope(params.worktree),
-        parentScope: {
-          agentId: params.agentId,
-          conversationId: params.conversationId,
-        },
-        silentCompletion: true,
-        onComplete: (result) => {
-          resolve({
-            success: result.success,
-            error: result.success
-              ? undefined
-              : (result.error ?? "Reflection integration did not complete"),
-            conversationId: result.conversationId,
-          });
-        },
-      });
-      void waitForBackgroundSubagentConversationId(
-        subagentId,
-        REFLECTION_AGENT_ID_WAIT_MS,
-      )
-        .then(async (conversationId) => {
-          if (!conversationId) return;
-          await getBackend().updateConversation(conversationId, {
-            summary: buildReflectionIntegrationConversationTitle(
-              params.reflectionSubagentId,
-            ),
-          });
-        })
-        .catch((error) => {
-          debugWarn(
-            "memory",
-            `Failed to title reflection integration conversation: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        });
-    } catch (error) {
-      resolve({
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
 }
 
 export async function prepareReflectionMemoryWorktreeLaunch(params: {
@@ -573,8 +505,13 @@ export async function finalizeReflectionMemoryWorktreeLaunch(params: {
   subagentType?: "reflection";
   knownNoChanges?: boolean;
   model?: string | null;
-  mergePolicy?: "auto" | "explicit";
+  mergePolicy?: "auto" | "explicit" | "client";
   mergeInstructions?: string;
+  /** `merge: "client"` approval context: the reflected range and its payload. */
+  client?: {
+    messageRange?: { start?: string; end?: string };
+    payload?: string;
+  };
   runExplicitIntegration?: RunExplicitReflectionIntegration;
   /** Pushes the integration merge; the integration child cannot while the lease is held. */
   syncIntegratedMemory?: typeof syncPendingMemoryCommitsAfterTurn;
@@ -608,6 +545,13 @@ export async function finalizeReflectionMemoryWorktreeLaunch(params: {
 
   let integrationRun: ReflectionIntegrationOutcome | undefined;
   const finalizeOptions = () => ({
+    ...clientMergeFinalizeOptions({
+      mergePolicy: params.mergePolicy,
+      agentId: params.agentId,
+      conversationId: params.conversationId,
+      messageRange: params.client?.messageRange,
+      transcriptPayload: params.client?.payload,
+    }),
     shouldMerge: params.subagentSuccess,
     knownNoChanges: params.knownNoChanges,
     requireAlreadyMerged:
@@ -924,6 +868,13 @@ export async function launchReflectionSubagent(
             model: reflectionModel,
             mergePolicy: reflectionSettings.merge,
             mergeInstructions: reflectionSettings.mergeInstructions,
+            client: {
+              messageRange: {
+                start: autoPayload.startMessageId,
+                end: autoPayload.endMessageId,
+              },
+              payload: autoPayload.payloadPath,
+            },
             telemetryContext: { triggerSource },
             recompileByConversation,
             recompileQueuedByConversation,

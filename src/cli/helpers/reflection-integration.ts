@@ -1,4 +1,12 @@
-import type { ReflectionMemoryWorktree } from "@/agent/memory-worktree";
+import {
+  buildReflectionIntegrationMemoryScope,
+  type ReflectionMemoryWorktree,
+} from "@/agent/memory-worktree";
+import { getBackend } from "@/backend";
+import { debugWarn } from "@/utils/debug";
+
+/** Max wait for the integration conversation's ID before titling it. */
+const INTEGRATION_CONVERSATION_ID_WAIT_MS = 30_000;
 
 export function buildReflectionIntegrationConversationTitle(
   reflectionSubagentId?: string,
@@ -35,4 +43,81 @@ Merge the completed reflection branch into your memory repository without pushin
 Do not ask the user questions or wait for input. Handle the integration as far as you safely can and explain any remaining blocker in your final response. If integration remains incomplete, the harness will clean up this proposal without consuming the source transcript so reflection can retry later.
 
 ${instructions ? `## IMPORTANT: Additional reflection merge instructions from the user\n\nThe user explicitly configured the following instructions for this integration. Follow them carefully:\n\n<reflection-merge-instructions>\n${instructions}\n</reflection-merge-instructions>\n\n` : ""}When finished, provide a concise normal summary of what you reviewed, changed, and merged.`;
+}
+
+export interface ReflectionIntegrationOutcome {
+  success: boolean;
+  error?: string;
+  conversationId?: string;
+}
+
+export type RunExplicitReflectionIntegration =
+  typeof runExplicitReflectionIntegration;
+
+export async function runExplicitReflectionIntegration(params: {
+  agentId: string;
+  conversationId: string;
+  worktree: ReflectionMemoryWorktree;
+  instructions?: string;
+  reflectionSubagentId?: string;
+}): Promise<ReflectionIntegrationOutcome> {
+  const {
+    spawnBackgroundSubagentTask,
+    waitForBackgroundSubagentConversationId,
+  } = await import("@/tools/impl/task");
+  return await new Promise<ReflectionIntegrationOutcome>((resolve) => {
+    try {
+      const { subagentId } = spawnBackgroundSubagentTask({
+        subagentType: "general-purpose",
+        displayType: "reflection integration",
+        prompt: buildReflectionIntegrationPrompt({
+          worktree: params.worktree,
+          instructions: params.instructions,
+          reflectionSubagentId: params.reflectionSubagentId,
+        }),
+        description: "Integrate reflection memory changes",
+        existingAgentId: params.agentId,
+        memoryScope: buildReflectionIntegrationMemoryScope(params.worktree),
+        parentScope: {
+          agentId: params.agentId,
+          conversationId: params.conversationId,
+        },
+        silentCompletion: true,
+        onComplete: (result) => {
+          resolve({
+            success: result.success,
+            error: result.success
+              ? undefined
+              : (result.error ?? "Reflection integration did not complete"),
+            conversationId: result.conversationId,
+          });
+        },
+      });
+      void waitForBackgroundSubagentConversationId(
+        subagentId,
+        INTEGRATION_CONVERSATION_ID_WAIT_MS,
+      )
+        .then(async (conversationId) => {
+          if (!conversationId) return;
+          await getBackend().updateConversation(conversationId, {
+            summary: buildReflectionIntegrationConversationTitle(
+              params.reflectionSubagentId,
+            ),
+          });
+        })
+        .catch((error) => {
+          debugWarn(
+            "memory",
+            `Failed to title reflection integration conversation: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+    } catch (error) {
+      resolve({
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
 }

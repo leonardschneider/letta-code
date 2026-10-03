@@ -859,6 +859,11 @@ async function handleReflectCommand(
       agentId,
       conversationId,
       memfsEnabled: settingsManager.isMemfsEnabled(agentId),
+      // Project-scoped settings (merge mode) live in the conversation's cwd, not the process's.
+      reflectionSettings: getReflectionSettings(
+        agentId,
+        getConversationWorkingDirectory(listener, agentId, conversationId),
+      ),
       triggerSource: "manual",
       description: "Reflecting on conversation",
       recompileByConversation: listener.systemPromptRecompileByConversation,

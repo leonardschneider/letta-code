@@ -8,6 +8,7 @@ import type {
   GetExperimentsCommand,
   GetExperimentsResponseMessage,
   GetReflectionSettingsCommand,
+  ReflectionMergeMode,
   ReflectionSettingsScope,
   SetExperimentCommand,
   SetExperimentResponseMessage,
@@ -21,6 +22,10 @@ import {
   isSetReflectionSettingsCommand,
 } from "@/websocket/listener/protocol-inbound";
 import { emitDeviceStatusUpdate } from "@/websocket/listener/protocol-outbound";
+import {
+  bindReflectionMergeClient,
+  unbindReflectionMergeClient,
+} from "@/websocket/listener/reflection-merge-client";
 import type { ListenerRuntime } from "@/websocket/listener/types";
 import type { RunDetachedListenerTask, SafeSocketSend } from "./types";
 
@@ -44,8 +49,9 @@ function toReflectionSettingsResponse(
   agent_id: string;
   trigger: "off" | "step-count" | "compaction-event";
   step_count: number;
-  merge: "auto" | "explicit";
+  merge: ReflectionMergeMode;
   merge_instructions: string;
+  merge_modes: ReflectionMergeMode[];
 } {
   const settings = getReflectionSettings(agentId, workingDirectory);
   return {
@@ -54,6 +60,7 @@ function toReflectionSettingsResponse(
     step_count: settings.stepCount,
     merge: settings.merge,
     merge_instructions: settings.mergeInstructions,
+    merge_modes: ["auto", "explicit", "client"],
   };
 }
 
@@ -212,6 +219,12 @@ export async function handleReflectionSettingsCommand(
         persistGlobal,
       },
     );
+    // merge: "client" binds approval to this connection; any other mode unbinds it.
+    if (parsed.settings.merge === "client") {
+      bindReflectionMergeClient(agentId, socket, safeSocketSend);
+    } else if (parsed.settings.merge !== undefined) {
+      unbindReflectionMergeClient(agentId);
+    }
     safeSocketSend(
       socket,
       {

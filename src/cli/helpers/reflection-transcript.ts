@@ -22,6 +22,7 @@ import { withFileLock } from "@/utils/file-lock";
 import { parseFrontmatter } from "@/utils/frontmatter";
 import { getTranscriptRoot } from "@/utils/transcript-paths";
 import type { Line } from "./accumulator";
+import { markUntrustedToolResults } from "./reflection-untrusted";
 import { safeJsonParseOr } from "./safe-json-parse";
 
 const LEGACY_MESSAGE_ID_STATE_SCHEMA_VERSION = "v2_message_id";
@@ -630,12 +631,11 @@ function normalizeReflectionTranscript(entries: TranscriptEntry[]): string {
     source: "letta-code",
     transcript,
     sourceContext: { partial: true },
-    bounds: {
-      toolArguments: { maxCharacters: null },
-    },
+    bounds: { toolArguments: { maxCharacters: null } },
     filters: { toolResults: "include" },
   });
-  return JSON.stringify(records, null, 2);
+  // Tool results are others' content: marked untrusted for the reflection.
+  return JSON.stringify(markUntrustedToolResults(records).records, null, 2);
 }
 
 function lineToTranscriptEntry(
